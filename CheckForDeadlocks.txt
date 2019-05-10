@@ -1,0 +1,38 @@
+USE master
+
+SET NOCOUNT ON
+
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED
+
+DECLARE @SQL VARCHAR(200)
+DECLARE @MinDate VARCHAR(10) --= (SELECT CONVERT(VARCHAR(10),GETDATE(),23))
+DECLARE @MaxDate VARCHAR(10) --= (SELECT CONVERT(VARCHAR(10),GETDATE()+1,23))
+DECLARE @MinLogDate DATETIME
+DECLARE @MaxLogDate DATETIME
+
+SET @MinDate = (SELECT CONVERT(VARCHAR(10),GETDATE(),23))
+SET @MaxDate = (SELECT CONVERT(VARCHAR(10),GETDATE()+1,23))
+
+SET @SQL = 'EXEC master.dbo.xp_readerrorlog 0, 1, N'''', NULL, N''' + @MinDate + ''', N''' + @MaxDate + ''', N''desc'''
+
+DECLARE @ErrorLog TABLE (LogDate DateTime, ProcessInfo VARCHAR(20), [Text] VARCHAR(MAX))
+
+INSERT INTO @ErrorLog
+EXEC (@SQL)
+
+SELECT DISTINCT TOP 1 @MinLogDate = LogDate FROM @ErrorLog
+WHERE [Text] LIKE '%deadlock%'
+AND LogDate >= DATEADD(MINUTE,-30,GETDATE())
+
+SET @MaxLogDate = (SELECT DATEADD(SECOND,+45,@MinLogDate))
+
+IF EXISTS(SELECT [Text] FROM @ErrorLog WHERE LogDate BETWEEN @MinLogDate AND @MaxLogDate
+AND ProcessInfo like 'deadlock%')
+BEGIN
+SELECT [Text] FROM @ErrorLog WHERE LogDate BETWEEN @MinLogDate AND @MaxLogDate
+AND ProcessInfo like 'spid%'
+END
+ELSE
+BEGIN
+SELECT 1/0  
+END
