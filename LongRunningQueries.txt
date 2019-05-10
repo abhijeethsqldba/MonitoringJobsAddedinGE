@@ -1,0 +1,95 @@
+--------Long Running Queries Process Monitor-----------
+
+SET NOCOUNT ON
+SET ANSI_WARNINGS OFF
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED 
+
+DECLARE @Session_ID NVARCHAR(100)
+DECLARE @HostName VARCHAR(200)
+DECLARE @Login_Name NVARCHAR(100)
+DECLARE @Begin_Time NVARCHAR(MAX)
+DECLARE @Duration NVARCHAR(MAX)
+DECLARE @Log_Records NVARCHAR(MAX)
+DECLARE @Log_Bytes NVARCHAR(MAX)
+DECLARE @Log_Rsvd NVARCHAR(MAX)
+DECLARE @Database_Name VARCHAR(100)
+DECLARE @Last_TSQL_Text NVARCHAR(MAX)
+DECLARE @msg VARCHAR(MAX)
+DECLARE @msg1 VARCHAR(MAX)
+DECLARE @msg2 VARCHAR(MAX)
+DECLARE @Sub NVARCHAR(MAX)
+
+SET @Sub = ' Long Running Process Alert: ' + @@SERVERNAME
+
+DECLARE @LongRunningTransactions TABLE (RowId INT, Session_ID NVARCHAR(100), Login_Name NVARCHAR(100), HostName VARCHAR(200), Database_Name NVARCHAR(100), Begin_Time NVARCHAR(MAX), Duration NVARCHAR(MAX), Log_Records NVARCHAR(MAX), Log_Bytes NVARCHAR(MAX), Log_Rsvd NVARCHAR(MAX), Last_Tsql_Text NVARCHAR(MAX))
+
+INSERT INTO @LongRunningTransactions
+SELECT ROW_NUMBER() OVER (PARTITION BY s_er.session_id ORDER BY s_tdt.[database_transaction_log_record_count] DESC) AS RowId,
+s_er.session_id,
+s_es.[login_name],
+s_es.[host_name],
+DB_NAME(s_tdt.database_id) as [Database Name],
+ s_er.start_time AS [Begin Time], 
+DATEDIFF(SS,s_er.start_time,GETDATE()) as Duration,
+   s_tdt.[database_transaction_log_record_count] AS [Log Records], 
+   s_tdt.[database_transaction_log_bytes_used] AS [Log Bytes], 
+    s_tdt.[database_transaction_log_bytes_reserved] AS [Log Rsvd], 
+   s_est.[text] AS [Last T-SQL Text]   
+from sys.dm_exec_requests s_er 
+join sys.dm_tran_database_transactions s_tdt
+on s_er.transaction_id = s_tdt.transaction_id
+   JOIN sys.[dm_exec_sessions] s_es 
+      ON s_es.[session_id] = s_er.[session_id] 
+   JOIN sys.dm_exec_connections s_ec 
+      ON s_ec.[session_id] = s_er.[session_id]       
+   CROSS APPLY sys.dm_exec_sql_text (s_ec.[most_recent_sql_handle]) AS s_est 
+    OUTER APPLY sys.dm_exec_query_plan (s_er.[plan_handle]) AS s_eqp 
+   WHERE DATEDIFF(SECOND,s_er.start_time,GETDATE()) > 600 AND
+   DB_NAME(s_tdt.database_id) NOT IN ( 'msdb','Master')
+   ORDER BY [Begin Time] ASC
+   
+   
+DECLARE LongRunningTransactions_Cursor CURSOR FOR 
+SELECT DISTINCT Session_ID, HostName, Login_Name, Database_Name, Begin_Time, Duration,
+Log_Records, Log_Bytes, Log_Rsvd, Last_Tsql_Text FROM @LongRunningTransactions 
+WHERE Database_Name NOT IN('master','model','msdb','distribution') AND RowId = 1
+OPEN LongRunningTransactions_Cursor
+FETCH NEXT FROM LongRunningTransactions_Cursor INTO
+@Session_ID, @HostName, @Login_Name, @Database_Name, @Begin_Time, @Duration, @Log_Records, @Log_Bytes, @Log_Rsvd, @Last_Tsql_Text
+
+WHILE @@FETCH_STATUS = 0
+BEGIN 
+
+SET @msg = 'The following processes are currently running more than 10 Mins: ' + char(10) + char(10)+
+           'Session_ID = '  + @Session_ID + CHAR(10)+
+		   'Host Name = ' + @HostName + CHAR(10) + 
+           'Login Name = ' + @Login_Name + CHAR(10) +
+           'Database Name = ' + @Database_Name + CHAR (10) +
+           'Begin Time = '  + @Begin_Time + CHAR(10) +
+           'Duration = ' + @Duration + ' Secs' + CHAR(10) +
+           'Log Records = ' + @Log_Records + CHAR(10) +
+           'Log Bytes = ' + @Log_Bytes + CHAR(10) +
+           'Log Rsvd = '  + @Log_Rsvd + CHAR(10) +
+           'TSQL Text = '  + @Last_TSQL_Text
+USE msdb
+   
+    EXEC sp_send_dbmail
+    @profile_name = 'OE_Internal',
+    @recipients = 'abhijeet.bandla@ge.com;',    
+    @subject = @Sub ,
+    @body = @msg
+   
+   
+      
+ FETCH NEXT FROM LongRunningTransactions_Cursor INTO 
+@Session_ID, @HostName, @Login_Name, @Database_Name, @Begin_Time, @Duration, @Log_Records, @Log_Bytes, @Log_Rsvd, @Last_Tsql_Text
+END
+CLOSE LongRunningTransactions_Cursor
+DEALLOCATE LongRunningTransactions_Cursor
+ 
+
+GO
+
+
+ 
+ 

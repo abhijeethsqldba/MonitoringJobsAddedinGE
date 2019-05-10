@@ -1,0 +1,76 @@
+sqlcmd -I -E -S vdcawp1379\pnsqlpgsop20 -d "Master" -i "C:\Scripts\Monitoring\PowerShell\SQLErrorLogMonitor.sql" -o "C:\Scripts\Monitoring\PowerShell\Output\SQLErrorLog.txt"
+
+DECLARE @Sub VARCHAR(100)  = 'SQL Server Error Logs: '  + @@SERVERNAME
+EXEC msdb.dbo.sp_send_dbmail  @profile_name = 'OE_Internal',
+                                  @recipients = 'abhijeet.bandla@ge.com; ronald.white@ge.com; David.Letchworth@ge.com',
+                                  @body = 'SQL Error Log',
+                                  @file_attachments = 'C:\Scripts\Monitoring\PowerShell\Output\SQLErrorLog.txt',
+                                  @subject = @Sub
+								  
+								  
+--Get yesterdays date
+SET NOCOUNT ON
+DECLARE @Date DATETIME
+
+SET @Date = CONVERT(VARCHAR,(SELECT GETDATE()-1),112)
+
+--create temp tale for capture data
+CREATE TABLE #Errors (LogDate DATETIME,ProcessInfo varchar(max),vchMessage varchar(max))
+
+--select @Date
+--select * from #Errors
+--select * from #Errors
+
+--insert into temp table
+INSERT #Errors 
+EXEC master.dbo.xp_readerrorlog 0, 1, null, null, @Date, null
+
+
+--check any errors
+SELECT @@SERVERNAME AS ServerName, LogDate, CAST(RTRIM(LTRIM(vchMessage)) AS VARCHAR(MAX)) AS Message --into #final 
+FROM #Errors WHERE 
+([vchMessage] like '%error%'
+   or  [vchMessage] like '%fail%'
+   or  [vchMessage] like '%Warning%'
+   or  [vchMessage] like '%The SQL Server cannot obtain a LOCK resource at this time%'
+   or  [vchMessage] like '%Autogrow of file%in database%cancelled or timed out after%'
+   or  [vchMessage] like '%Consider using ALTER DATABASE to set smaller FILEGROWTH%'
+   or  [vchMessage] like '% is full%'
+   or  [vchMessage] like '% blocking processes%'
+   or  [vchMessage] like '%SQL Server has encountered%IO requests taking longer%to complete%'
+   or  [vchMessage] like '%deadlock-list%deadlock victim%'
+   or  [vchMessage] like '%(c) Microsoft Corporation%'
+)
+and [vchMessage] not like '%\ERRORLOG%'
+and [vchMessage] not like '%Attempting to cycle errorlog%'
+and [vchMessage] not like '%Errorlog has been reinitialized.%' 
+and [vchMessage] not like '%found 0 errors and repaired 0 errors.%'
+and [vchMessage] not like '%without errors%'
+and [vchMessage] not like '%This is an informational message%'
+and [vchMessage] not like '%WARNING:%Failed to reserve contiguous memory%'
+and [vchMessage] not like '%The error log has been reinitialized%'
+and [vchMessage] not like '%Setting database option ANSI_WARNINGS%'
+and [vchMessage] not like '%Error: 15457, Severity: 0, State: 1%'
+and [vchMessage] not like '%Error: 18456, %'
+and [vchMessage] not like '%Login failed for user%'
+
+
+--select * from #Errors
+--select * from #final
+
+--SELECT CAST(( SELECT 
+--[ServerName] AS 'td' ,'',[LogDate] AS 'td' ,'',[Message] AS 'td' FROM #final
+--Where 1 = 1 FOR XML PATH('tr'), ELEMENTS ) AS NVARCHAR(MAX))
+
+--exec master.dbo.usp_EmailTblasHTML 
+--                          @source_db    = 'tempdb',
+--                          @schema       = '',
+--                          @object_name  = '#final',
+--						    @where_clause = 'Where 1 = 1',
+--                          @order_clause = 'ServerName',
+--                          @email = 'abhijeet.bandla@ge.com',
+--						    @sub  = 'SQL Error Log for QA Server',
+--                          @Importance = 1
+  
+--DROP TABLE #Errors
+--drop table #final

@@ -1,0 +1,91 @@
+SET NOCOUNT ON
+GO
+SET ANSI_WARNINGS OFF
+GO
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED 
+
+DECLARE @SPID INT
+DECLARE @CPU INT
+DECLARE @Blocked INT
+DECLARE @DBID INT
+DECLARE @Physical_IO INT
+DECLARE @MemUsage INT
+DECLARE @Login_Time Datetime
+DECLARE @Wait_Time Datetime
+DECLARE @Status VARCHAR(100)
+DECLARE @LoginName NVARCHAR(100)
+DECLARE @Msg NVARCHAR(MAX)
+DECLARE @Sub NVARCHAR(MAX)
+DECLARE @SQL VARCHAR(1000)
+
+
+
+DECLARE @BLOCKING_MONITOR TABLE ( SPID INT, CPU INT, Blocked INT, DBID INT, Physical_IO INT, MemUsage INT,
+Login_Time Datetime, WaitTime INT, Status Varchar(50), Login_Name NVARCHAR(200), RowID INT)
+
+INSERT INTO @BLOCKING_MONITOR
+select distinct spid, cpu, blocked, dbid, physical_io, memusage, login_time,waittime, status, 
+HostName + loginame AS login_Name,
+ROW_NUMBER() OVER(PARTITION BY spid ORDER BY spid) AS RowId
+from sys.sysprocesses where blocked > 50 AND DB_NAME(DBID) NOT IN
+('Master','Model','MSDB','Distribution') AND spid <> blocked
+
+DECLARE BlockingMonitor_Cursor CURSOR FOR select DISTINCT spid, cpu, blocked, dbid, physical_io, memusage, login_time,waittime, status, 
+login_Name from @BLOCKING_MONITOR
+WHERE RowId = 1
+OPEN BlockingMonitor_Cursor
+FETCH NEXT FROM BlockingMonitor_Cursor INTO
+@SPID, @CPU, @Blocked, @DBID, @Physical_IO, @MemUsage, @Login_Time, @Wait_Time, @Status,
+@LoginName
+
+SET @sub = 'Blocking Alert: ' + @@SERVERNAME
+
+WHILE @@FETCH_STATUS = 0
+BEGIN 
+
+DECLARE @Block TABLE(EventType VARCHAR(100), Parameters INT, EventInfo VARCHAR(MAX))
+
+DELETE FROM @Block
+
+INSERT INTO @Block
+EXEC ('DBCC INPUTBUFFER(' + @Blocked + ')' )
+
+DECLARE @Blocking TABLE(EventType VARCHAR(100), Parameters INT, EventInfo VARCHAR(MAX))
+
+DELETE FROM @Blocking
+
+INSERT INTO @Blocking
+EXEC ('DBCC INPUTBUFFER(' + @SPID + ')' )
+
+
+SET @msg = 'The following processes are currently Blocking : ' + char(10) + char(10)+
+           'SPID = ' + CAST(@SPID as VARCHAR(10)) + CHAR(10)+
+           'CPU = ' + CAST(@CPU as VARCHAR(10))+ CHAR(10) +
+           'Blocked = ' + CAST(@Blocked as VARCHAR(10)) + CHAR (10) +
+           'DB_Name = ' + CAST(DB_NAME(@DBID) AS VARCHAR(20)) + CHAR(10) +
+           'Physical_IO = ' + CAST(@Physical_IO AS VARCHAR(10)) + CHAR(10) +
+           'MemUsage = ' + CAST(@MemUsage AS VARCHAR(20))+ CHAR(10) +
+		   'Login Name = ' + CAST(@LoginName AS VARCHAR(200)) + CHAR(10) + 
+           'Login_Time = ' + CAST(@Login_Time AS NVARCHAR(100))+ CHAR(10) +
+           'Status = ' + CAST(@Status AS NVARCHAR(100)) + CHAR(10) + CHAR(10) + 
+		   'Blocking Query = ' + (SELECT TOP 1 EventInfo FROM @Block) + CHAR(10) + CHAR(10) + 
+		   'Blocked Query = ' + (SELECT TOP 1 EventInfo FROM @Blocking) 
+       
+           
+    USE msdb
+   
+    EXEC sp_send_dbmail
+      @profile_name = 'OE_Internal',
+      @recipients = 'abhijeet.bandla@ge.com; ronald.white@ge.com; David.Letchworth@ge.com',
+      @subject = @Sub,
+      @body = @msg
+ 
+ 
+FETCH NEXT FROM BlockingMonitor_Cursor INTO 
+@SPID, @CPU, @Blocked, @DBID, @Physical_IO, @MemUsage, @Login_Time, @Wait_Time, @Status,
+@LoginName
+END
+CLOSE BlockingMonitor_Cursor
+DEALLOCATE BlockingMonitor_Cursor
+
+GO            

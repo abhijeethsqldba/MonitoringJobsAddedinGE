@@ -1,0 +1,141 @@
+USE GTAE
+GO
+
+SET NOCOUNT ON
+
+--Drop if temp table exists
+IF OBJECT_ID('tempdb..#fraglist') IS NOT NULL
+DROP TABLE #fraglist
+
+--Drop if temp table exists
+IF OBJECT_ID('tempdb..#Defraglist') IS NOT NULL
+DROP TABLE #DefragList
+ 
+--Declare run time variables
+DECLARE @Debug      BIT = 0     /** 0 = Execute, 1 = Print **/
+DECLARE @tablename  VARCHAR(255)
+DECLARE @objectid   INT
+DECLARE @indexid    INT
+DECLARE @Min        INT = 1 
+DECLARE @Max        INT 
+DECLARE @Table      VARCHAR(255)
+DECLARE @FragPct    INT
+DECLARE @Index      VARCHAR(255)
+DECLARE @SQLString  VARCHAR(500)
+DECLARE @StartTime  DATETIME = GETDATE()
+
+--Declare cursor for getting the table list
+DECLARE tables CURSOR FOR  
+SELECT TABLE_NAME
+FROM INFORMATION_SCHEMA.TABLES  
+WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = 'dbo'; 
+   
+--Create table for storing dbcc results
+CREATE TABLE #fraglist (  
+ObjectName char(255),  
+ObjectId int,  
+IndexName char(255),  
+IndexId int,  
+Lvl int,  
+CountPages int,  
+CountRows int,  
+MinRecSize int, 
+MaxRecSize int, 
+AvgRecSize int, 
+ForRecCount int,
+Extents int,  
+ExtentSwitches int,  
+AvgFreeBytes int,  
+AvgPageDensity int,
+ScanDensity decimal,  
+BestCount int,  
+ActualCount int,
+LogicalFrag decimal,  
+ExtentFrag decimal); 
+
+OPEN tables;  
+  
+FETCH NEXT  
+   FROM tables  
+   INTO @tablename;  
+   WHILE @@FETCH_STATUS = 0  
+BEGIN  
+
+--Populate temp table with fragmentation results
+INSERT INTO #fraglist   
+EXEC ('DBCC SHOWCONTIG (''' + @tablename + ''')   
+      WITH FAST, TABLERESULTS, ALL_INDEXES, NO_INFOMSGS');    FETCH NEXT  
+      FROM tables  
+      INTO @tablename;  
+END;  
+CLOSE tables;  
+DEALLOCATE tables;  
+
+--Generate dynamic sql statements for REBUILD/REORGANIZE & UPDATE STATISTICS based on fragmentation percent
+--Also handle indexes on columns which have page locks disabled
+;WITH RecSet AS(
+select ObjectName, IndexName, LogicalFrag,
+CASE WHEN (LogicalFrag BETWEEN 10 AND 30) 
+                                  THEN (
+								  CASE WHEN b.allow_page_locks = 1 THEN 'ALTER INDEX ' + QUOTENAME(RTRIM(IndexName)) + ' ON ' + QUOTENAME(RTRIM(ObjectName)) + ' REORGANIZE;' 
+                                  + CHAR(10) + 'UPDATE STATISTICS ' + QUOTENAME(RTRIM(ObjectName)) + ' (' + QUOTENAME(RTRIM(IndexName)) + ');' 
+								  ELSE 'ALTER INDEX ' + QUOTENAME(RTRIM(IndexName))  + ' ON ' +  QUOTENAME(RTRIM(ObjectName)) + ' REBUILD;' END )
+     WHEN LogicalFrag > 30 THEN 'ALTER INDEX ' + QUOTENAME(RTRIM(IndexName))  + ' ON ' +  QUOTENAME(RTRIM(ObjectName)) + ' REBUILD;'	  
+	 ELSE NULL END AS IndexOperation
+from #fraglist a
+INNER JOIN sys.indexes b on a.IndexName = b.name AND A.ObjectId = B.object_id
+)
+SELECT DISTINCT ROW_NUMBER() OVER (ORDER BY ObjectName) AS RowId, ObjectName, IndexName, LogicalFrag, IndexOperation
+INTO #DefragList
+FROM RecSet 
+WHERE LogicalFrag > 10
+
+--Set @Max variable with max number of rows from temp table for the loop 
+SET @Max = (SELECT MAX(RowId) FROM #DefragList)
+
+PRINT CHAR(10)
+PRINT '==================================================================================================================='
+PRINT '=====Start of Index Rebuild/Reorganize process output for Server: ' + @@SERVERNAME + '; Database: ' +  DB_NAME() + ' ==' 
+PRINT '=====Start Time: ' + CONVERT(VARCHAR,GETDATE())
+PRINT '==================================================================================================================='
+
+--Set while loop to perform the defrag operation
+WHILE (@Min <= @Max)
+BEGIN
+
+SELECT @Table = ObjectName, @Index = IndexName,
+@FragPct = CONVERT(INT,LogicalFrag), @SQLString = IndexOperation FROM #DefragList WHERE RowId = @Min
+
+PRINT CHAR(10)
+PRINT 'Working on Table: ' + @Table
+PRINT 'Index Name: ' + @Index 
+PRINT 'Fragmentation: ' + CONVERT(VARCHAR,@FragPct)
+PRINT 'Executing: ' + @SQLString + CHAR(10)
+
+--Only execute if @Debug is set to 0
+IF (@Debug = 0)
+BEGIN
+EXEC (@SQLString)
+END
+ELSE
+BEGIN
+PRINT CHAR(10)
+END
+
+SET @Min = @Min + 1
+END
+
+PRINT '==================================================================================================================='
+PRINT '===== End of Rebuild/Reorganize process output for Server: ' + @@SERVERNAME + '; Database: ' +  DB_NAME() + ' ==========' 
+PRINT '===== End Time: ' + CONVERT(VARCHAR,GETDATE())
+PRINT '===== Total Time taken: ' + CONVERT(VARCHAR,DATEDIFF(MINUTE,@StartTime,GETDATE())) + ' Minute(s)'
+PRINT '==================================================================================================================='
+
+
+--Drop if temp table exists
+IF OBJECT_ID('tempdb..#fraglist') IS NOT NULL
+DROP TABLE #fraglist
+
+--Drop if temp table exists
+IF OBJECT_ID('tempdb..#Defraglist') IS NOT NULL
+DROP TABLE #DefragList
