@@ -1,0 +1,113 @@
+USE [master]
+GO
+IF OBJECT_ID('usp_EmailTblasHTML') IS NOT NULL
+DROP PROC [usp_EmailTblasHTML]
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+/*************************************************************************************/
+
+--V2015.10.10
+--This Proc will convert any table output to HTML Format and will throw out mail to recepient
+--This was created as new version for email_object_as_html, since the existing is not flexible
+
+  
+--exec master.dbo.usp_EmailTblasHTML 
+--                          @source_db    = 'tempdb',
+--                          @schema       = '',
+--                          @object_name  = '#Final',
+--						    @where_clause = 'Where dbname = ''xx''',
+--                          @order_clause = 'database_name',
+--                          @email = 'abhijeet.bandla@ge.com',
+--						    @sub  = 'Text',
+--                          @Importance = 1
+/************************************************************************************/
+CREATE PROC [usp_EmailTblasHTML]
+    @source_db    SYSNAME,        --  Where the @object_name is resident
+    @schema       SYSNAME,        --  Schema name eg.. dbo.
+    @object_name  NVARCHAR(100),  --  Table or view to email
+	@where_clause VARCHAR(500),   -- ex: "WHERE <col> = xx"
+    @order_clause NVARCHAR(MAX),  --  The order by clause eg. x, y, z
+    @email        NVARCHAR(MAX),  --  Email recipient list
+	@Sub          NVARCHAR(max),  --  Subject to set
+	@Importance   INT = 0         --  0 = Normal, 1 = High  
+
+AS
+
+SET NOCOUNT ON
+
+DECLARE @xml    NVARCHAR(MAX)
+DECLARE @xml1   NVARCHAR(MAX)
+DECLARE @xml2   NVARCHAR(MAX)
+DECLARE @xml3   NVARCHAR(MAX)
+DECLARE @body   NVARCHAR(MAX)
+DECLARE @Body1  NVARCHAR(MAX)
+
+DECLARE @Cols TABLE(RowId INT IDENTITY(1,1), ColName VARCHAR(150))
+DECLARE @XMLT TABLE(XMLString NVARCHAR(2000))
+
+--Set @XML Tag
+SET @xml1 = 'SELECT CAST(( SELECT ' + CHAR(10)
+SET @XML2 = ' FROM ' + @object_name + CHAR(10) + ISNULL(@Where_clause,'')
+SET @xml3 = ' FOR XML PATH(''tr''), ELEMENTS ) AS NVARCHAR(MAX))' + CHAR(10)
+
+--Set @Body Tag
+SET @Body1 = '
+<html><body><H3><U>HTML View</U></H3>
+ <table border = 1> 
+<tr>'
+
+--XML
+INSERT INTO @Cols(ColName)
+EXEC( 'select ''['' + name + ''] AS ''''td''''''
+        from ' + @source_db + '.sys.columns
+        where object_id = object_id( ''' + @source_db + '.' + @schema + '.' + @object_name + ''')
+        order by column_id
+        ' )
+
+SELECT @xml = COALESCE(@xml + ' ,'''',','') + ColName FROM @Cols  
+
+SET @XML = @xml1 + @XML + @XML2 + @xml3
+
+INSERT  INTO @XMLT(XMLString)
+EXEC (@XML)
+
+SET @XML = (SELECT TOP 1 XMLString FROM @XMLT)
+
+DELETE FROM @Cols
+
+--Body
+INSERT INTO @Cols(ColName)
+EXEC( 'select ''<th bgcolor="BDB76B">'' + name + ''</th>''
+        from ' + @source_db + '.sys.columns
+        where object_id = object_id( ''' + @source_db + '.' + @schema + '.' + @object_name + ''')
+        order by column_id
+        ' )
+
+
+SELECT @body = COALESCE(@body,'') + ColName FROM @Cols  
+
+SET @body = @body1 + @body + '</tr>' + CHAR(10) + @XML + '</table></body></html>'
+
+
+
+IF (@Importance = 0 AND ISNULL(@body,'') <> '')
+BEGIN
+    EXEC msdb.dbo.sp_send_dbmail  @profile_name = 'OE_Internal',
+                                  @recipients = @email,
+                                  @body = @body,
+                                  @body_format = 'HTML',
+                                  @subject = @Sub
+END
+IF (@Importance = 1 AND ISNULL(@body,'') <> '')
+BEGIN
+    EXEC msdb.dbo.sp_send_dbmail  @profile_name = 'OE_Internal',
+                                  @recipients = @email,
+                                  @body = @body,
+                                  @body_format = 'HTML',
+                                  @subject = @Sub,
+								  @Importance = 'HIGH'
+END
+GO
